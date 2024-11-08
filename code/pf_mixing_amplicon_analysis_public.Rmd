@@ -1,0 +1,759 @@
+---
+title: "Permafrost mixing study"
+subtitle: "Amplicon data: microbial community analyses"
+author: "Stacey Doherty - adapted from Baker et al. 2023 doi: 10.1088/1748-9326/acc542."
+date: "07/02/2024"
+output:
+    html_document:
+        toc: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+<!-- Render with rmarkdown::render('code/pf_mixing_amplicon_analysis.Rmd', output_file = '../analysis/pf_mixing_amplicon_analysis.html') -->
+
+<!-- More analysis resources on phyloseq website: https://joey711.github.io/phyloseq -->
+
+<!-- Accessor functions: https://joey711.github.io/phyloseq/preprocess.html -->
+<!-- https://bioconductor.riken.jp/packages/3.0/bioc/vignettes/phyloseq/inst/doc/phyloseq-basics.html#table:access -->
+
+```{r general settings, include=FALSE}
+knitr::opts_chunk$set(
+    message = FALSE,
+    warning = FALSE,
+    echo = FALSE,
+    fig.path = "../figures/amplicon/",
+    # fig.align='center',
+    fig.width = 11,
+    out.width = "100%",
+    dev = c("png", "pdf")
+)
+
+# include = FALSE --> execute but do not print code or results
+# echo = FALSE --> execute but do not print code
+# results = "hide" --> do not print results
+# eval = FALSE --> do not evaluate
+# warning = FALSE and message = FALSE --> hide warnings or messages produced
+# fig.height and fig.width --> control figure size in inches
+# out.width = "xx%" --> control figure size as fraction of HTML display width
+
+# theme_set(theme_bw())
+```
+
+```{r load libraries, include=FALSE}
+
+library("here")
+library("tidyverse")
+library("scales")
+# library("ggbeeswarm") # for geom_quasirandom
+
+library("cowplot") # to align multiple plots
+
+library("patchwork") # to align multiple plots - use for the ordinations to retain fixed aspect ratio
+
+# note: phyloseq install instructions at https://joey711.github.io/phyloseq/install.html
+#   use BiocLite rather than BiocManager as used here; the latter is preferred with R > 3.5
+# install.packages("BiocManager")
+# library("BiocManager")
+# BiocManager::install("phyloseq")
+library("phyloseq")
+
+#library("Biostrings")
+
+library("vegan")
+```
+
+```{r get data}
+
+# loads list of phyloseq objects: one for 16S and one for ITS
+
+    ps.list  <- readRDS(here("/path_to_rds_file", "amplicon.rds"))
+
+# parse metadata
+
+    process_sample_data <- function (sample.data) {
+        
+        processed.sample.data = sample.data %>% as("data.frame") %>%
+            # filter(Project == "permafrost_mix") %>% 
+            separate(Description, into = c("site", "mix_ratio", "replicate", "timepoint"), sep = "-", remove = FALSE) %>%
+            mutate(mix_time = paste(mix_ratio, timepoint, sep = "-")) %>%
+            mutate(site = factor(site, levels = c("APT", "TK1"))) %>%
+            mutate(mix_ratio = factor(mix_ratio, levels = c("100AL", "10PF_90AL" ,"50PF_50AL", "90PF_10AL", "100PF", "100TZ"))) %>%
+            mutate(replicate = factor(gsub("^R","", x = replicate), levels = c("1","2","3","4"))) %>%
+            mutate(timepoint = factor(timepoint, levels = c("t0","tf"))) %>%
+            mutate(mix_time = factor(mix_time, levels = c("100AL-t0", "100AL-tf", "10PF_90AL-tf" ,"50PF_50AL-tf", "90PF_10AL-tf", "100PF-t0", "100PF-tf", "100TZ-t0", "100TZ-tf"))) %>%
+            select(-Project, -BarcodePlate, -Barcode.Well)
+    
+        return(processed.sample.data) # yields a data frame
+        
+    }
+
+    for (dataset in c("16S","ITS")) {
+    
+        sample_data(ps.list[[dataset]]) <- process_sample_data(sample_data(ps.list[[dataset]]))
+      
+        # add read counts to metadata
+        sample_data(ps.list[[dataset]])$Reads <- ps.list[[dataset]] %>% sample_sums()
+    
+    }
+
+```
+
+```{r extract metadata to tibble}
+
+sample.data <- bind_rows(
+    ps.list$`16S` %>% sample_data() %>% as("data.frame"),
+    ps.list$`ITS` %>% sample_data() %>% as("data.frame")
+)
+
+rownames(sample.data) <- NULL
+  
+```
+
+**************************
+
+## Choosing rarefaction depth
+
+### Samples ranked by read count
+
+```{r view read counts and choose rarefaction depths}
+  
+# order samples by read counts
+
+    sample.data.ranked.by.reads <- sample.data %>%
+        group_by(Dataset) %>%
+        mutate(Rank = as.integer(rank(`Reads`))) %>% 
+        arrange(`Reads`, .by_group = TRUE) %>%
+        ungroup()
+
+# empty list for rarefaction depths
+
+    rarefaction.depth <- list("16S" = NA, "ITS" = NA)
+
+```
+
+Here are plots of read counts in all samples, ranked in order of read count, with samples colored by different variables. 
+
+```{r read_counts_ranked_samples, fig.width=8, out.width="73%", results='asis'}
+    
+# samples in order of read count
+
+# pdf(here("figures","read count ranked samples.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+#set colors for plots
+hex_colors <- c("#d73027", "#fc8d59", "#fee090", "#91bfdb", "#4575b4", "#91cf60") 
+
+    # read counts colored by different variables
+  
+    read.count.plot <- sample.data.ranked.by.reads %>%
+        ggplot() + geom_point(aes(x = Rank, y=Reads)) +
+            facet_wrap(~ Dataset, scales = "free", nrow = 1) + 
+            scale_y_continuous(labels = label_number(suffix = " K", scale = 1e-3)) +
+            expand_limits(y = 0) + scale_color_manual(values = hex_colors)
+    
+    read.count.plot + aes(col = site) + theme(legend.title = element_blank())
+    cat("</br>")
+
+    read.count.plot + aes(col = mix_ratio) + theme(legend.title = element_blank())
+    cat("</br>")
+  
+    read.count.plot + aes(col = timepoint)
+    cat("</br>")
+    
+    rm(read.count.plot)
+  
+#graphics.off()
+ 
+```
+
+### Read count boxplots
+
+Here are boxplots of read counts for all samples broken down by different variables. 
+
+```{r read_count_boxplots, fig.width = 10, fig.height = 4, out.width="36%", results="asis"}
+
+#pdf(here("figures","read count boxplots.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+    # read counts colored by different variables
+  
+    read.count.boxplot <- sample.data %>%
+        ggplot() + geom_boxplot(aes(y=Reads)) +
+            facet_wrap(~ Dataset, scales = "free", nrow = 1) + 
+            scale_y_continuous(labels = label_number(suffix = " K", scale = 1e-3)) +
+            expand_limits(y = 0) + scale_color_manual(values = hex_colors)+
+            theme(legend.position = "bottom")
+    
+    read.count.boxplot + aes(x = site) + theme(axis.title.x = element_blank())
+    cat("</br>")
+  
+    read.count.boxplot + aes(x = mix_ratio) + theme(axis.title.x = element_blank())
+    cat("</br>")
+  
+    read.count.boxplot + aes(x = timepoint)
+    cat("</br>")
+
+    rm(read.count.boxplot)
+  
+#graphics.off()
+
+
+```
+
+### Choice of rarefaction depth
+
+The plots above suggest a rarefaction depth of 10000 reads might work? Here is where that depth sits relative to the samples in each dataset.
+
+```{r read_counts_and_rarefaction_depths, fig.width=8, out.width="73%"}
+
+rarefaction.depth <- list(
+    "16S" = 10000,
+    "ITS" = 10000
+)
+
+# pdf(here("figures","read counts with rarefaction depths.pdf"), width = 6, height = 4, useDingbats = FALSE)
+
+    rarefaction.depth.df <- data.frame(Reads = do.call("c", rarefaction.depth)) %>% rownames_to_column(var = "Dataset")
+
+    sample.data.ranked.by.reads %>%
+        ggplot() + geom_point(aes(x = Rank, y = Reads)) +
+            facet_wrap(~ Dataset, scales = "free") + 
+            scale_y_continuous(labels = label_number(suffix = " K", scale = 1e-3)) +
+            expand_limits(y = 0) + scale_color_manual(values = hex_colors) +
+            geom_hline(data = rarefaction.depth.df, aes(yintercept = Reads), lty = "dashed", col = "red") +
+            geom_text(data = rarefaction.depth.df, aes(y = Reads, label = paste("rarefaction depth =", Reads)), x = 50, col = "red", vjust = -0.5)
+
+# graphics.off()        
+```
+
+## Alpha diversity analysis
+
+```{r prepare alpha diversity data}
+
+# remove extraction blanks from downstream analysis
+
+ps.list_filtered <- list(
+        "16S" = subset_samples(ps.list[["16S"]], !is.na(site)),
+        "ITS" = subset_samples(ps.list[["ITS"]], !is.na(site))
+    )
+
+# a single rarefaction for each dataset
+# - probably need to repeat this if we are going to publish
+
+    ps.list.rare.1 <- list(
+        "16S" = rarefy_even_depth(ps.list_filtered[["16S"]],
+            sample.size = rarefaction.depth[["16S"]],
+            rngseed = 123, replace = TRUE, trimOTUs = TRUE, verbose = TRUE),
+        "ITS" = rarefy_even_depth(ps.list_filtered[["ITS"]],
+            sample.size = rarefaction.depth[["ITS"]],
+            rngseed = 123, replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+    )
+
+# add diversity measures
+
+    for (dataset in c("16S","ITS")) {
+        sample_data(ps.list.rare.1[[dataset]])$richness <- otu_table(ps.list.rare.1[[dataset]]) %>%
+            apply(MARGIN = 1, FUN = function (X) sum(X > 0))
+        sample_data(ps.list.rare.1[[dataset]])$shannon <- vegan::diversity(otu_table(ps.list.rare.1[[dataset]]),
+            index = "shannon", MARGIN = 1)
+        sample_data(ps.list.rare.1[[dataset]])$invsimp <- vegan::diversity(otu_table(ps.list.rare.1[[dataset]]),
+            index = "invsimpson", MARGIN = 1)
+    }
+
+# extract diversity results data for plotting
+
+    alpha.div.data <- bind_rows(
+        "16S" = sample_data(ps.list.rare.1[["16S"]]) %>% as("data.frame"),
+        "ITS" = sample_data(ps.list.rare.1[["ITS"]]) %>% as("data.frame")
+    ) %>%
+    rename(`Observed_ASV_richness` = richness) %>%
+    rename(`Shannon_diversity` = shannon) %>%
+    rename(`Inverse_Simpson_diversity` = invsimp)
+
+
+```
+
+### Species richness plots
+
+```{r alpha_diversity_richness, fig.width=8, out.width="73%"}
+# pdf(here("figures","alpha diversity - observed richness.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+    for (dataset in c("16S","ITS")) {
+
+            alpha.plot <- alpha.div.data %>% filter(Dataset == dataset) %>%
+                ggplot(aes(x = `mix_ratio`, y = `Observed_ASV_richness`, col = factor(mix_ratio))) +
+                    geom_point() + facet_grid(. ~ site + timepoint, scales = "free_x", space = "free") +
+                    ggtitle(dataset) +
+                    expand_limits(y=0) + theme(legend.title = element_blank()) +
+                    theme_bw() +
+                    scale_color_manual(values = hex_colors, na.value = "grey")
+                    
+            print(alpha.plot)
+            
+            rm(alpha.plot)
+    
+    }  
+
+# graphics.off()
+
+```
+
+```{r alpha_diversity_richness, fig.width=8, out.width="73%"}
+# pdf(here("figures","alpha diversity - observed richness.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+    for (dataset in c("16S","ITS")) {
+
+            alpha.plot <- alpha.div.data %>% filter(Dataset == dataset) %>%
+                ggplot(aes(x = `mix_time`, y = `Observed_ASV_richness`, col = factor(mix_ratio))) +
+                    geom_boxplot() + facet_grid(. ~ site + timepoint, scales = "free_x", space = "free") +
+                    ggtitle(dataset) +
+                    expand_limits(y=0) + theme(legend.title = element_blank()) +
+                    theme_bw() +
+                    scale_color_manual(values = hex_colors, na.value = "grey")
+                    
+            print(alpha.plot)
+            
+            rm(alpha.plot)
+    
+    }  
+
+# graphics.off()
+
+```
+
+
+
+### Shannon diversity plots
+
+```{r alpha_diversity_shannon, fig.width=8, out.width="73%"}
+
+# pdf(here("figures","alpha diversity - shannon diversity.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+    for (dataset in c("16S","ITS")) {
+
+            alpha.plot <- alpha.div.data %>% filter(Dataset == dataset) %>%
+                ggplot(aes(x = `mix_time`, y = `Shannon_diversity`, col = factor(mix_ratio))) +
+                    geom_point() + facet_grid(. ~ site + timepoint, scales = "free_x", space = "free")+
+                    ggtitle(dataset) +
+                    expand_limits(y=0) + theme(legend.title = element_blank()) + theme_bw() +
+                    scale_color_manual(values = hex_colors, na.value = "grey")
+                    
+            print(alpha.plot)
+            
+            rm(alpha.plot)
+    
+    }  
+
+# graphics.off()
+```
+
+```{r alpha_diversity_shannon, fig.width=8, out.width="73%"}
+
+# pdf(here("figures","alpha diversity - shannon diversity.pdf"), width = 8, height = 4, useDingbats = FALSE)
+
+    for (dataset in c("16S","ITS")) {
+
+            alpha.plot <- alpha.div.data %>% filter(Dataset == dataset) %>%
+                ggplot(aes(x = `mix_time`, y = `Shannon_diversity`, col = factor(mix_ratio))) +
+                    geom_boxplot() + facet_grid(. ~ site + timepoint, scales = "free_x", space = "free") +
+                    ggtitle(dataset) +
+                    expand_limits(y=0) + theme_bw() + theme(
+                      text = element_text(size = 18),
+                      axis.title = element_text(size = 14),
+                      axis.text = element_text(size = 12),
+                      legend.title = element_text(size = 14),
+                      legend.text = element_text(size = 12)) +
+                    scale_color_manual(values = hex_colors, na.value = "grey")
+                    
+            print(alpha.plot)
+            
+            rm(alpha.plot)
+    
+    }  
+
+# graphics.off()
+```
+
+### Alpha diversity stats
+
+```{r prepare data by subsetting sites and timepoints}
+
+#remove ITS data
+alpha.div.data.16S <- subset(alpha.div.data, Dataset == "16S")
+
+#subset data into sites for anova
+div_tf_apt <- subset(alpha.div.data.16S, site == "APT" & timepoint == "tf")
+div_tf_tk1 <- subset(alpha.div.data.16S, site == "TK1" & timepoint == "tf")
+div_t0_apt <- subset(alpha.div.data.16S, site == "APT" & timepoint == "t0")
+div_t0_tk1 <- subset(alpha.div.data.16S, site == "TK1" & timepoint == "t0")
+
+################  ANOVA Shannon diversity
+######## Compute the analysis of variance for all dataframes above. Note only one example is shown here 
+div_apt.aov <- aov(Shannon_diversity ~ mix_ratio, data = div_t0_apt)
+
+## Summary of the analysis
+summary(div_apt.aov)
+
+######### Check Assumptions of the test
+
+## Assumption 1: Normality of the residual
+plot(div_apt.aov,2) #Q-Q plot
+
+shapiro.test(x = residuals(object = div_apt.aov)) # Shapiro-Wilk test
+## data are  NORMAL
+
+## Assumption 2: Homogeineity of Variance
+library(car) # Use Levene test from the car library
+
+leveneTest(Shannon_diversity ~ mix_ratio, data = div_t0_apt)
+## data do  have common variance
+
+#tukey multiple comparison
+
+library(multcomp)
+library(multcompView)
+
+my.mod = lm(Shannon_diversity ~ mix_ratio, data = div_t0_apt)
+my.tukey <- TukeyHSD(aov(my.mod))
+
+my.letters <- multcompLetters4(my.mod, my.tukey, reversed = TRUE)
+as.data.frame.list(my.letters$mix_ratio)[1]
+
+```
+
+
+
+## Beta diversity analysis
+
+
+```{r prepare data by subsetting sites}
+
+# remove extraction blanks from downstream analysis
+
+ps.list_filtered_apt <- list(
+        "16S" = subset_samples(ps.list_filtered[["16S"]], site != "TK1"),
+        "ITS" = subset_samples(ps.list_filtered[["ITS"]], site != "TK1")
+    )
+
+ps.list_filtered_tk1 <- list(
+        "16S" = subset_samples(ps.list_filtered[["16S"]], site != "APT"),
+        "ITS" = subset_samples(ps.list_filtered[["ITS"]], site != "APT")
+    )
+
+```
+
+# beta diversity - all samples
+```{r calculate average bray-curtis distances}
+
+# avgdist rarefaction for beta diversity analysis
+
+# avgdist(x, sample, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray", ...)
+
+## N.B. currently only running 10 iterations ##
+## increase this value for final analysis ##
+
+num.iter <- 1000 #change to 10 for prelim analysis
+
+bray.dists <- list(
+    "16S" = ps.list_filtered[["16S"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["16S"]], iterations = num.iter, dmethod = "bray"),
+    "ITS" = ps.list_filtered[["ITS"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["ITS"]], iterations = num.iter, dmethod = "bray")
+)
+
+saveRDS(bray.dists, file = here("bray_dists_1000.rds"))
+
+# or load up previous data:
+
+#bray.dists <- readRDS(file = here("bray_dists_1000.rds"))
+    
+```
+
+```{r calculate ordinations, include = FALSE}
+# ordinations for rarefied OTU tables
+
+    bray_curtis_NMDS <- lapply(bray.dists, metaMDS)
+
+```      
+
+```{r NMDS_plots, fig.width = 8, out.width="73%"}
+
+# pdf(here("figures","beta diversity - bray curtis NMDS.pdf"), width = 6, height = 5, useDingbats = FALSE)
+
+    nmds.plot <- list()
+
+    for (dataset in c("16S","ITS")) {
+        
+        my.title.text <- paste(dataset, "Bray-Curtis")
+        
+        nmds.plot[[dataset]] <- plot_ordination(ps.list_filtered[[dataset]], bray_curtis_NMDS[[dataset]], type = "samples") +
+            coord_equal() + theme_bw() + theme(legend.position = "bottom") + ggtitle(my.title.text) + geom_point(size = 2.5) +
+            annotate("text", x = Inf, y = Inf, hjust = 1.25, vjust = 2.5,
+                label = paste0("stress = ", sprintf("%.2f", bray_curtis_NMDS[[dataset]]$stress)))
+
+        rm(my.title.text)
+
+    }
+
+    # plot ordinations using patchwork package to retain fixed aspect ratio
+    #  - the "+" between plots indicates to align them 
+  
+    # color by site treatment 
+    (nmds.plot[["16S"]] + aes(color = site) + theme(legend.title = element_blank())) +
+        (nmds.plot[["ITS"]] + aes(color = site) + theme(legend.title = element_blank()))
+
+    # color by mix_ratio treatment 
+    (nmds.plot[["16S"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey")) +
+        (nmds.plot[["ITS"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey"))
+
+    # color by timepoint treatment 
+    (nmds.plot[["16S"]] + aes(color = timepoint) + theme(legend.title = element_blank())) +
+        (nmds.plot[["ITS"]] + aes(color = timepoint) + theme(legend.title = element_blank()))
+
+    # add one where mix_ratio is color and shape is timepoint
+      
+# graphics.off()
+
+```
+
+
+
+# beta diversity - apt samples
+```{r calculate average bray-curtis distances}
+
+# avgdist rarefaction for beta diversity analysis
+
+# avgdist(x, sample, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray", ...)
+
+## N.B. currently only running 10 iterations ##
+## increase this value for final analysis ##
+
+num.iter <- 1000
+
+bray.dists <- list(
+    "16S" = ps.list_filtered_apt[["16S"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["16S"]], iterations = num.iter, dmethod = "bray"),
+    "ITS" = ps.list_filtered_apt[["ITS"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["ITS"]], iterations = num.iter, dmethod = "bray")
+)
+
+saveRDS(bray.dists, file = here("bray_dists_1000_apt.rds"))
+
+# or load up previous data:
+
+#bray.dists <- readRDS(file = here("bray_dists_1000_apt.rds"))
+
+#Permanova 
+sample_data_df_16 <- ps.list_filtered_apt[["16S"]] %>% sample_data() %>% as("data.frame")
+sample_data_df_16 <- sample_data_df_16[sample_data_df_16$SampleID != "16S_APT.10PF_90AL.R4.tf", ] #remove samples that were dropped after rarefying
+adonis_16S <- adonis2(bray.dists[["16S"]]~ mix_ratio, data=sample_data_df_16, by=NULL) 
+
+    
+```
+
+```{r calculate ordinations, include = FALSE}
+# ordinations for rarefied OTU tables
+
+    bray_curtis_NMDS <- lapply(bray.dists, metaMDS)
+
+```      
+
+```{r NMDS_plots, fig.width = 8, out.width="73%"}
+
+# pdf(here("figures","beta diversity - bray curtis NMDS.pdf"), width = 6, height = 5, useDingbats = FALSE)
+
+    nmds.plot <- list()
+
+    for (dataset in c("16S","ITS")) {
+        
+        my.title.text <- paste(dataset, "APT Bray-Curtis")
+        
+        nmds.plot[[dataset]] <- plot_ordination(ps.list_filtered_apt[[dataset]], bray_curtis_NMDS[[dataset]], type = "samples") +
+            coord_equal() + theme_bw() + theme(legend.position = "right") + ggtitle(my.title.text) + geom_point(size = 2.5) +
+            annotate("text", x = Inf, y = Inf, hjust = 1.25, vjust = 2.5,
+                label = paste0("stress = ", sprintf("%.2f", bray_curtis_NMDS[[dataset]]$stress)))
+
+        rm(my.title.text)
+
+    }
+
+    # plot ordinations using patchwork package to retain fixed aspect ratio
+    #  - the "+" between plots indicates to align them 
+
+    # color by mix_ratio treatment 
+    (nmds.plot[["16S"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey")) +
+        (nmds.plot[["ITS"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey"))
+
+      
+# graphics.off()
+
+```
+
+
+
+# beta diversity - tk1 samples
+```{r calculate average bray-curtis distances}
+
+# avgdist rarefaction for beta diversity analysis
+
+# avgdist(x, sample, distfun = vegdist, meanfun = mean, transf = NULL, iterations = 100, dmethod = "bray", ...)
+
+## N.B. currently only running 10 iterations ##
+## increase this value for final analysis ##
+
+num.iter <- 1000
+
+bray.dists <- list(
+    "16S" = ps.list_filtered_tk1[["16S"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["16S"]], iterations = num.iter, dmethod = "bray"),
+    "ITS" = ps.list_filtered_tk1[["ITS"]] %>% otu_table() %>% as("matrix") %>% 
+        avgdist(sample = rarefaction.depth[["ITS"]], iterations = num.iter, dmethod = "bray")
+)
+
+saveRDS(bray.dists, file = here("bray_dists_1000_tk1.rds"))
+
+# or load up previous data:
+
+#bray.dists <- readRDS(file = here("bray_dists_1000_tk1.rds"))
+
+
+#Permanova 
+sample_data_df_16 <- ps.list_filtered_tk1[["16S"]] %>% sample_data() %>% as("data.frame")
+sample_data_df_16 <- sample_data_df_16[sample_data_df_16$SampleID != "16S_TK1.100PF.R4.t0", ] #remove samples that were dropped after rarefying
+sample_data_df_16 <- sample_data_df_16[sample_data_df_16$SampleID != "16S_TK1.90PF_10AL.R4.tf", ] #remove samples that were dropped after rarefying
+adonis_16S <- adonis2(bray.dists[["16S"]]~ mix_ratio, data=sample_data_df_16, by=NULL) 
+
+    
+```
+
+```{r calculate ordinations, include = FALSE}
+# ordinations for rarefied OTU tables
+
+    bray_curtis_NMDS <- lapply(bray.dists, metaMDS)
+
+```      
+
+```{r NMDS_plots, fig.width = 8, out.width="73%"}
+
+# pdf(here("figures","beta diversity - bray curtis NMDS.pdf"), width = 6, height = 5, useDingbats = FALSE)
+
+    nmds.plot <- list()
+
+    for (dataset in c("16S","ITS")) {
+        
+        my.title.text <- paste(dataset, "TK1 Bray-Curtis")
+        
+        nmds.plot[[dataset]] <- plot_ordination(ps.list_filtered_tk1[[dataset]], bray_curtis_NMDS[[dataset]], type = "samples") +
+            coord_equal() + theme_bw() + theme(legend.position = "right") + ggtitle(my.title.text) + geom_point(size = 2.5) + 
+            annotate("text", x = Inf, y = Inf, hjust = 3.10, vjust = 2.5,
+                label = paste0("stress = ", sprintf("%.2f", bray_curtis_NMDS[[dataset]]$stress)))
+
+        rm(my.title.text)
+
+    }
+
+    # plot ordinations using patchwork package to retain fixed aspect ratio
+    #  - the "+" between plots indicates to align them 
+
+    # color by mix_ratio treatment 
+    (nmds.plot[["16S"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey")) +
+        (nmds.plot[["ITS"]] + aes(color = mix_ratio, shape = timepoint) + theme(legend.title = element_blank()) + scale_color_manual(values = hex_colors, na.value = "grey"))
+
+ 
+# graphics.off()
+
+```
+
+
+## Taxon barplots
+
+```{r prepare taxon barplot data}
+    
+# aggregate at phylum (16S) or class (ITS)
+
+    ps.list.rare.1.glom <- list(
+            "16S" = ps.list.rare.1[["16S"]] %>% tax_glom("silva_phylum"),
+            "ITS" = ps.list.rare.1[["ITS"]] %>% tax_glom("unite_class")
+        )
+
+# prune phyloseq objects to top 10 taxa
+
+    top10.names <- lapply(ps.list.rare.1.glom, FUN = function (X) {
+        names(sort(taxa_sums(X), decreasing=TRUE))[1:10]
+    })
+
+    top10.phyloseq <- sapply(names(top10.names), FUN = function (X) {
+        prune_taxa(top10.names[[X]], ps.list.rare.1.glom[[X]])
+    })
+
+# get (aggregated) ASV table, taxon metadata, sample metadata for top 10 taxa
+    
+    top10.phyloseq.otu <- lapply(top10.phyloseq, FUN = function (X) {
+        otu_table(X) %>% as.data.frame() %>% rownames_to_column("SampleID")
+    })
+      
+    top10.phyloseq.tax <- list(
+      "16S" = tax_table(top10.phyloseq[["16S"]]) %>% as.data.frame() %>% rownames_to_column("ASV") %>% select(ASV, silva_phylum),
+      "ITS" = tax_table(top10.phyloseq[["ITS"]]) %>% as.data.frame() %>% rownames_to_column("ASV") %>% select(ASV, unite_class)
+    )
+
+    top10.phyloseq.sample <- lapply(top10.phyloseq, FUN = function (X) {
+        sample_data(X) %>% as("data.frame") %>% select(SampleID, site, mix_ratio, timepoint, mix_time, replicate)
+            # %>% mutate(RDX = factor(ifelse(RDX == "RDX", "+RDX", ifelse(RDX == "No RDX", "-RDX", NA)), levels = c("-RDX", "+RDX"))) %>%
+            # mutate(strain.11Y = factor(ifelse(strain.11Y == "11Y", "+11Y", ifelse(strain.11Y == "No 11Y", "-11Y", NA)), levels = c("-11Y", "+11Y"))) %>%
+            # mutate(Compost = factor(ifelse(Compost == "Compost", "+Comp", ifelse(Compost == "No compost", "-Comp", NA)), levels = c("-Comp", "+Comp")))
+    })
+
+# create dataframe for plotting and clean up names
+    
+    top10.df <- sapply(names(top10.names), FUN = function (X) {
+        full_join(top10.phyloseq.sample[[X]], top10.phyloseq.otu[[X]], by = "SampleID") %>%
+            pivot_longer(-c(SampleID, site, mix_ratio, timepoint, mix_time, replicate), names_to = "ASV", values_to = "Rarefied reads") %>%
+            left_join(top10.phyloseq.tax[[X]], by = "ASV") %>% select(-ASV)
+    }, simplify = FALSE)
+
+    top10.df$`16S` <- top10.df$`16S` %>%
+        rename(`Silva phylum` = silva_phylum)
+
+    top10.df$`ITS` <- top10.df$`ITS` %>%
+        rename(`Unite class` = unite_class) %>%
+        mutate(`Unite class` = gsub("c__", "", `Unite class`))
+
+```
+
+
+```{r 16S barplot}
+
+# 16S barplots
+
+barplot_silva_phylum <- top10.df[["16S"]] %>%
+    ggplot(aes(x = SampleID, y= `Rarefied reads`, fill = `Silva phylum`)) +
+        geom_col(width=0.75, position = "stack", col = "black", linewidth = 0) + 
+        scale_fill_brewer(palette = "Paired") + theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+        ggtitle ("16S") + labs(x = "Mix Ratio") +
+        facet_grid(. ~ site + timepoint, scales = "free_x", space = "free") +
+        scale_y_continuous(labels = label_number(suffix = "K", scale = 1e-3))
+
+barplot_silva_phylum
+
+# ggsave(filename = here("figures","barplot_16S_silva_phylum.pdf"), width = 12, height = 7, useDingbats = FALSE)
+
+```
+
+```{r ITS barplot}
+
+# ITS barplots
+
+barplot_unite_class <- top10.df[["ITS"]] %>%
+    ggplot(aes(x = SampleID, y = `Rarefied reads`, fill = `Unite class`)) +
+        geom_col(width=0.75, position = "stack", col = "black", linewidth = 0) + 
+        scale_fill_brewer(palette = "Paired") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+        ggtitle ("ITS") + labs(x = "Mix Ratio") +
+        facet_grid(. ~ site + timepoint, scales = "free_x", space = "free") +
+        scale_y_continuous(labels = label_number(suffix = "K", scale = 1e-3))
+
+barplot_unite_class
+
+# ggsave(filename = here("figures","barplot_ITS_unite_class.pdf"), width = 12, height = 7, useDingbats = FALSE)
+```
+
+```{r
